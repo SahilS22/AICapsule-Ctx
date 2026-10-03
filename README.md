@@ -153,3 +153,7 @@ Capsule lineage (context that compounds across hops) · cross-capsule retrieval 
 ---
 
 *Built as a local-first Manifest V3 extension: TypeScript, React (two pages), a zero-dependency shadow-DOM panel, IndexedDB, and no backend.*
+
+## License
+
+MIT — see [LICENSE](LICENSE).
