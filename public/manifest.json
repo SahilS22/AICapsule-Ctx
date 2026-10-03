@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "Context Capsule",
+  "version": "0.1.0",
+  "description": "Your AI conversations, portable. Create a Context Capsule, carry it to another AI, continue where you left off.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://chat.deepseek.com/*",
+    "https://grok.com/*",
+    "https://perplexity.ai/*",
+    "https://www.perplexity.ai/*",
+    "https://meta.ai/*",
+    "https://www.meta.ai/*",
+    "https://copilot.microsoft.com/*",
+    "https://chat.mistral.ai/*",
+    "https://kimi.com/*",
+    "https://www.kimi.com/*",
+    "https://poe.com/*",
+    "https://www.poe.com/*",
+    "https://duckduckgo.com/*",
+    "https://chat.duckduckgo.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.groq.com/*",
+    "https://openrouter.ai/*",
+    "https://integrate.api.nvidia.com/*",
+    "https://api.mistral.ai/*",
+    "https://api.deepseek.com/*",
+    "https://api.x.ai/*",
+    "https://api.cohere.com/*",
+    "http://localhost:11434/*",
+    "http://localhost:1234/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://chat.deepseek.com/*",
+        "https://grok.com/*",
+        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*",
+        "https://meta.ai/*",
+        "https://www.meta.ai/*",
+        "https://copilot.microsoft.com/*",
+        "https://chat.mistral.ai/*",
+        "https://kimi.com/*",
+        "https://www.kimi.com/*",
+        "https://poe.com/*",
+        "https://www.poe.com/*",
+        "https://duckduckgo.com/*",
+        "https://chat.duckduckgo.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Context Capsule"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

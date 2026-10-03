@@ -1,0 +1,27 @@
+{
+  "name": "context-capsule",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable, privacy-first context capsules for AI conversations.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "esbuild": "^0.23.1",
+    "simple-icons": "^13.21.0",
+    "typescript": "~5.5.4",
+    "vite": "^5.4.3",
+    "vitest": "^2.1.1"
+  }
+}
