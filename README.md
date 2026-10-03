@@ -32,6 +32,8 @@ Pasting a transcript into a new AI is slow, expensive and half-effective: the mo
 | **Sent bubble card** | Your sent message is replaced by an attachment card (brand logo + name + tokens). Click it to expand the exact context the AI received. |
 | **Capsule Radar** | Detects when the chat you reopened *is* one of your capsules and pulses the FAB. |
 | **Ask my capsule** | One-off targeted retrieval: ask a question, only the matching memories + excerpts attach to your next message. |
+| **Capsule stacking** | Tick the `+` on any number of capsules and *Unseal together* merges them into **one** handoff: the seamless directive is stated once, and any line two chats both recorded appears once. |
+| **Project folders** | File capsules under a project (`Folder` in the manager, ⓘ → folder in the panel). The panel groups them A–Z with collapsible headers, unfiled last; the folder travels inside the exported file. |
 
 Delivery is **verified, never assumed**: text insertion is re-checked after the editor's own model settles (ChatGPT's Lexical and Gemini's ProseMirror both silently revert naive DOM writes), and the chip only reports success with proof.
 
@@ -43,7 +45,7 @@ Delivery is **verified, never assumed**: text insertion is re-checked after the 
 | **2 — Relevant** | Individual memories scored against your query | Only when a query is supplied, budget-permitting |
 | **3 — Archive** | The full original conversation, code fences preserved byte-for-byte | Never wholesale — up to 4 verbatim, token-budgeted *deep-recall excerpts* scored against the destination chat |
 
-Default handoff budget is 4,000 estimated tokens; the core is always paid for first, then retrieval, then excerpts with whatever room remains.
+Default handoff budget is 4,000 estimated tokens; the core is always paid for first, then retrieval, then excerpts with whatever room remains. A stacked handoff splits that budget across its capsules and deduplicates shared lines, so two chats about the same project cost noticeably less than the sum of their separate handoffs.
 
 ## Supported platforms
 

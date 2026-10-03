@@ -121,6 +121,8 @@ export interface CapsuleFile {
   updated_at: string;
   source_platform: PlatformId;
   project: { name: string; objective: string; description: string };
+  /** Optional project grouping. Travels with the file so a re-import keeps order. */
+  folder?: string;
   core_context: CoreContext;
   conversation: { meta: ConversationMeta; summary: string; keyEvents: string[] };
   memories: MemoryItem[];
@@ -263,6 +265,9 @@ export function validateCapsuleFile(raw: unknown): { ok: true; file: CapsuleFile
       memoryTokensEstimated: asNum(metadata.memoryTokensEstimated)
     }
   };
+
+  const folder = asStr(raw.folder).replace(/\s+/g, ' ').trim().slice(0, 64);
+  if (folder) file.folder = folder;
 
   return { ok: true, file };
 }

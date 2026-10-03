@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { normalizeMessages } from '../src/core/extraction/messages';
 import { createCapsule } from '../src/core/capsule/create';
 import { searchCapsule } from '../src/core/retrieval/search';
-import { buildHandoff } from '../src/core/retrieval/router';
+import { buildHandoff, buildStackedHandoff } from '../src/core/retrieval/router';
 import { recallExcerpts } from '../src/core/retrieval/recall';
 import { dedupeSimilar } from '../src/core/compression/core';
 
@@ -95,6 +95,62 @@ describe('context router (minimum sufficient context)', () => {
     ]);
     expect(kept).toHaveLength(2);
     expect(kept[1]).toMatch(/offline/);
+  });
+});
+
+describe('multi-capsule stack', () => {
+  const shared = [
+    { role: 'user', text: 'My goal is to add vector search to our notes app.', timestamp: null },
+    { role: 'assistant', text: 'We decided to use ChromaDB because it runs embedded and needs no server.', timestamp: null },
+    { role: 'user', text: 'The app must stay fully offline.', timestamp: null }
+  ] as const;
+
+  function from(title: string, extra: string, platform: 'chatgpt' | 'claude' = 'chatgpt') {
+    return createCapsule({
+      platform,
+      url: 'https://chatgpt.com/c/x',
+      title,
+      messages: normalizeMessages([...shared, { role: 'user', text: extra, timestamp: null }])
+    });
+  }
+
+  it('states the seamless directive once and keeps one header per capsule', () => {
+    const h = buildStackedHandoff([from('Search chat', 'Ship the ingestion pipeline.'), from('Infra chat', 'Deploy on the edge VM.')]);
+    expect((h.text.match(/do not greet/g) ?? []).length).toBe(1);
+    expect((h.text.match(/^# Context Capsule:/gm) ?? []).length).toBe(2);
+    expect(h.text.match(/^# Context Capsule:.*$/m)?.[0]).toMatch(/\[from chatgpt\]$/);
+    expect((h.text.match(/End of capsule context/g) ?? []).length).toBe(1);
+    expect(h.text).toMatch(/Search chat[\s\S]*Infra chat/);
+  });
+
+  it('costs a shared decision one line instead of two', () => {
+    const h = buildStackedHandoff([from('Search chat', 'Ship the ingestion pipeline.'), from('Infra chat', 'Deploy on the edge VM.')]);
+    expect((h.text.match(/- We decided to use ChromaDB[^\n]*/g) ?? []).length).toBe(1);
+    // …while the detail unique to the second chat survives.
+    expect(h.text).toMatch(/edge VM/);
+    const singles = [from('Search chat', 'Ship the ingestion pipeline.'), from('Infra chat', 'Deploy on the edge VM.')].map(
+      (c) => buildHandoff(c).budget.totalTokens
+    );
+    expect(h.budget.totalTokens).toBeLessThan(singles[0] + singles[1]);
+  });
+
+  it('reports a breakdown that adds up to the total', () => {
+    const h = buildStackedHandoff([from('Search chat', 'x'), from('Infra chat', 'y'), from('Review chat', 'z')]);
+    const b = h.budget;
+    expect(b.coreTokens + b.retrievedTokens + b.archiveTokens).toBe(b.totalTokens);
+    expect(b.coreTokens).toBeGreaterThan(0);
+  });
+
+  it('honours a shared budget across capsules', () => {
+    const h = buildStackedHandoff([from('Search chat', 'x'), from('Infra chat', 'y')], { budgetTokens: 10 });
+    expect(h.budget.totalTokens).toBeGreaterThan(0);
+    expect(h.text).toContain('# Context Capsule:');
+  });
+
+  it('degrades to a single handoff and rejects an empty stack', () => {
+    const only = from('Search chat', 'x');
+    expect(buildStackedHandoff([only]).text).toBe(buildHandoff(only).text);
+    expect(() => buildStackedHandoff([])).toThrow(/No capsules/);
   });
 });
 

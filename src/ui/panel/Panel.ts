@@ -1,7 +1,7 @@
 import type { CapsuleFile, MemoryItem, PlatformId } from '../../core/capsule/schema';
 import type { CapsuleListItem, CapsuleStats, PageInfo, UpdateDiffEntry } from '../../types/messages';
 import { capsuleStats } from '../../core/capsule/diff';
-import { buildHandoff } from '../../core/retrieval/router';
+import { buildHandoff, buildStackedHandoff } from '../../core/retrieval/router';
 import { searchCapsule } from '../../core/retrieval/search';
 import { parseCapsuleText, serializeCapsule, capsuleFilename } from '../../core/capsule/file';
 import { estimateMessagesTokens, formatTokens } from '../../core/tokenization/estimate';
@@ -46,7 +46,10 @@ export class CapsulePanel {
   private chipRaf = 0;
   private pendingHandoff: string | null = null;
   private interceptor: { key: (e: KeyboardEvent) => void; click: (e: MouseEvent) => void } | null = null;
-  private activeCapsuleId: string | null = null;
+  private activeIds: string[] = [];
+  /** Capsules queued for a combined unseal (multi-capsule attach). */
+  private stack = new Set<string>();
+  private collapsedFolders = new Set<string>();
 
   private reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -82,11 +85,12 @@ export class CapsulePanel {
   async syncFromStore(): Promise<void> {
     await this.refreshCapsules();
     const gone = (id: string | null) => !!id && !this.capsules.some((c) => c.id === id);
-    if (gone(this.activeCapsuleId)) {
+    if (this.activeIds.some((id) => gone(id))) {
       this.disarmHandoff();
       this.hideChip();
-      this.activeCapsuleId = null;
+      this.activeIds = [];
     }
+    this.stack = new Set([...this.stack].filter((id) => this.capsules.some((c) => c.id === id)));
     if (gone(this.detailCapsule?.id ?? null)) {
       this.detailCapsule = null;
       this.detailStats = null;
@@ -303,13 +307,17 @@ export class CapsulePanel {
   }
 
   /**
-   * Unseal a capsule. By default the handoff text is NOT shown in the composer:
+   * Unseal one or more capsules. The handoff text is NOT shown in the composer:
    * it is armed inside the chip and silently rides along with the user's next
    * sent message. `submit=true` (Start & Send) sends the handoff as one visible
    * first message instead.
    */
   private async injectCapsule(capsule: CapsuleFile, submit: boolean): Promise<boolean> {
-    if (this.busy) return false;
+    return this.injectHandoff([capsule], submit);
+  }
+
+  private async injectHandoff(capsules: CapsuleFile[], submit: boolean): Promise<boolean> {
+    if (this.busy || !capsules.length) return false;
     const composer = this.opts.adapter.getComposer();
     if (!composer) {
       this.setView('main');
@@ -319,8 +327,12 @@ export class CapsulePanel {
       return false;
     }
     this.busy = true;
-    const handoff = buildHandoff(capsule, { recallQuery: this.recallQueryForThisPage() });
-    this.activeCapsuleId = capsule.id;
+    const recallQuery = this.recallQueryForThisPage();
+    const handoff =
+      capsules.length > 1
+        ? buildStackedHandoff(capsules, { recallQuery })
+        : buildHandoff(capsules[0], { recallQuery });
+    this.activeIds = capsules.map((c) => c.id);
     if (submit) {
       this.submitWithShield(handoff.text);
     } else {
@@ -331,10 +343,10 @@ export class CapsulePanel {
     this.render();
     // Chip + armed handoff land immediately; the 2s unseal FX plays on top,
     // so the composer is ready the moment it ends.
-    this.showChip(capsule, handoff.budget.totalTokens);
+    this.showChip(capsules, handoff.budget.totalTokens);
     await this.playUnseal(
       composer.getBoundingClientRect(),
-      capsule.source_platform,
+      capsules[0].source_platform,
       `~${formatTokens(handoff.budget.totalTokens)} ctx`
     );
     this.busy = false;
@@ -343,11 +355,34 @@ export class CapsulePanel {
     return true;
   }
 
+  /** Unseal every queued capsule as a single combined handoff. */
+  private async unsealStack(): Promise<boolean> {
+    if (this.busy) return false;
+    const ids = [...this.stack];
+    if (!ids.length) return false;
+    this.busy = true;
+    this.render();
+    try {
+      const capsules: CapsuleFile[] = [];
+      for (const id of ids) {
+        capsules.push(await this.opts.sendToBackground<CapsuleFile>({ type: 'GET_CAPSULE', capsuleId: id }));
+      }
+      this.busy = false;
+      const ok = await this.injectHandoff(capsules, false);
+      if (ok) this.stack.clear();
+      return ok;
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.busy = false;
+      this.render();
+      return false;
+    }
+  }
+
   // ------------------------------------------------- sent-message capsule card
 
   /** Show sent handoff bubbles as an attachment-style capsule card (icon + name only). */
   private decorateSentCapsules() {
-    const MARK = '# Context Capsule:';
     const nodes = this.opts.adapter.getUserMessageNodes();
     nodes.forEach((node) => {
       if (node.querySelector(':scope > [data-cc-head]')) return; // decorated & still intact
@@ -355,13 +390,20 @@ export class CapsulePanel {
       if (!raw) return;
       // Some platforms prefix invisible chars or labels before the text.
       const text = raw.replace(/[\u200b-\u200d\ufeff]/g, '');
-      const at = text.indexOf(MARK);
+      // A stacked handoff carries one header per capsule; the router appends
+      // "[from <platform>]" so the card can show each source chat's logo.
+      const headers = [...text.matchAll(/# Context Capsule:[ \t]*([^\n]*)/g)];
+      if (!headers.length) return;
+      const at = headers[0].index ?? -1;
       if (at === -1 || at > 60) return;
-      const firstLine = text.slice(at + MARK.length).split('\n')[0].trim();
-      // The router appends "[from <platform>]" so the card can show the source chat's logo.
-      const from = firstLine.match(/\s*\[from\s+([a-z0-9_-]+)\]\s*$/i);
-      const platform = (from?.[1] ?? '') as PlatformId;
-      const name = (from ? firstLine.slice(0, from.index) : firstLine).trim() || 'Capsule';
+      const parsed = headers.map((m) => {
+        const line = (m[1] ?? '').trim();
+        const from = line.match(/\s*\[from\s+([a-z0-9_-]+)\]\s*$/i);
+        const platform = (from?.[1] ?? '') as PlatformId;
+        const name = (from ? line.slice(0, from.index) : line).trim() || 'Capsule';
+        return { name, platform };
+      });
+      const extra = parsed.length - 1;
       const tok = Math.max(1, Math.round(text.length / 4));
 
       node.style.position = 'relative';
@@ -374,14 +416,24 @@ export class CapsulePanel {
 
       const logo = document.createElement('span');
       logo.style.cssText =
-        'flex:none;width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;' +
+        'position:relative;flex:none;width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;' +
         'background:#ffffff;border:1px solid rgba(47,107,255,.22);box-shadow:0 1px 2px rgba(10,42,107,.18);';
-      const svg = platformIconSvg(platform, 18);
+      const svg = platformIconSvg(parsed[0].platform, 18);
       if (svg) logo.innerHTML = svg;
-      else logo.textContent = '◉'; // older capsule without provenance, or a platform we have no mark for
-      if (!svg) {
+      else {
+        logo.textContent = '◉'; // older capsule without provenance, or a platform we have no mark for
         logo.style.font = '700 15px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
         logo.style.color = '#2f6bff';
+      }
+      if (extra > 0) {
+        const badge = document.createElement('span');
+        badge.style.cssText =
+          'position:absolute;right:-5px;bottom:-5px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;' +
+          'display:flex;align-items:center;justify-content:center;background:#2f6bff;color:#fff;' +
+          'font:700 9px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
+          'box-shadow:0 1px 3px rgba(10,42,107,.45);';
+        badge.textContent = String(parsed.length);
+        logo.appendChild(badge);
       }
 
       const meta = document.createElement('span');
@@ -390,12 +442,12 @@ export class CapsulePanel {
       nm.style.cssText =
         'display:block;font:600 12.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
         'color:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      nm.textContent = name;
+      nm.textContent = extra > 0 ? `${parsed[0].name} +${extra} more` : parsed[0].name;
       const sub = document.createElement('span');
       sub.style.cssText =
         'display:block;font:500 10.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
         'opacity:.62;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      sub.textContent = `~${tok} tok attached`;
+      sub.textContent = `~${tok} tok attached${extra > 0 ? ` · ${parsed.length} capsules` : ''}`;
       meta.append(nm, sub);
 
       const chevron = document.createElement('span');
@@ -736,23 +788,35 @@ export class CapsulePanel {
 
   // ---------------------------------------------------------- composer chip
 
-  private showChip(capsule: CapsuleFile, injectedTokens: number) {
+  private showChip(capsules: CapsuleFile[], injectedTokens: number) {
     this.hideChip();
+    const first = capsules[0];
+    const extra = capsules.length - 1;
     const chip = document.createElement('button');
     chip.className = 'cc-chip';
-    chip.setAttribute('aria-label', `Active capsule: ${capsule.project.name}`);
+    const names = capsules.map((c) => c.project.name).join(', ');
+    chip.setAttribute('aria-label', extra > 0 ? `Active capsules: ${names}` : `Active capsule: ${first.project.name}`);
+    chip.title = names;
     const logo = document.createElement('span');
     logo.className = 'cc-chip-logo';
-    const svg = platformIconSvg(capsule.source_platform, 17);
+    const svg = platformIconSvg(first.source_platform, 17);
     if (svg) logo.innerHTML = svg;
     else logo.appendChild(this.capsuleEl('cc-chip-capsule'));
+    if (extra > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'cc-chip-count';
+      badge.textContent = String(capsules.length);
+      logo.appendChild(badge);
+    }
     const txt = document.createElement('span');
     txt.className = 'cc-chip-txt';
     const name = document.createElement('span');
     name.className = 'cc-chip-name';
-    name.textContent = capsule.project.name;
+    name.textContent = extra > 0 ? `${first.project.name} +${extra} more` : first.project.name;
     const tok = document.createElement('span');
     tok.className = 'cc-chip-meta';
+    // The count lives on the badge and the "+N more" name — the meta line has
+    // ~150px and must not ellipsize.
     tok.textContent = `~${formatTokens(injectedTokens)} tok · rides next msg`;
     txt.append(name, tok);
     const x = document.createElement('span');
@@ -763,12 +827,12 @@ export class CapsulePanel {
       e.stopPropagation();
       this.disarmHandoff();
       this.hideChip();
-      this.activeCapsuleId = null;
+      this.activeIds = [];
     };
     chip.append(logo, txt, x);
     chip.onclick = () => {
-      this.detailCapsule = capsule;
-      this.detailStats = capsuleStats(capsule);
+      this.detailCapsule = first;
+      this.detailStats = capsuleStats(first);
       this.updateDiff = null;
       this.searchQuery = '';
       this.panelOpen = true;
@@ -1007,43 +1071,133 @@ export class CapsulePanel {
       body.appendChild(empty);
     }
 
-    for (const [idx, item] of this.capsules.slice(0, 6).entries()) {
-      const card = document.createElement('div');
-      card.className = 'cc-card cc-pick';
-      if (this.busy) card.setAttribute('aria-disabled', 'true');
-      card.appendChild(this.pickIcon(item.sourcePlatform, idx));
-      const txt = document.createElement('div');
-      txt.className = 'cc-pick-txt';
-      const t = document.createElement('div');
-      t.className = 'cc-card-title';
-      t.textContent = item.projectName + (this.activeCapsuleId === item.id ? ' · unsealed here' : '');
-      const s = document.createElement('div');
-      s.className = 'cc-card-sub';
-      s.textContent = `v${item.currentVersion} · updated ${formatRelative(item.updatedAt)} · ~${formatTokens(item.coreTokens)} core tokens`;
-      txt.append(t, s);
-      const unseal = document.createElement('button');
-      unseal.className = 'cc-mini-btn cc-pick-go';
-      unseal.textContent = 'Unseal ↩';
-      unseal.title = 'Keep this capsule in the chip — it rides along with your next sent message';
-      unseal.disabled = this.busy;
-      unseal.onclick = (e) => {
-        e.stopPropagation();
-        void this.unsealFromList(item);
-      };
-      const info = document.createElement('button');
-      info.className = 'cc-mini-btn cc-pick-info';
-      info.textContent = 'ⓘ';
-      info.title = 'Open capsule details';
-      info.onclick = (e) => {
-        e.stopPropagation();
-        void this.openDetail(item);
-      };
-      card.append(txt, unseal, info);
-      card.onclick = () => {
-        if (!this.busy) void this.unsealFromList(item);
-      };
-      body.appendChild(card);
+    if (this.stack.size) this.renderStackBar(body);
+
+    // Group by folder: named folders A–Z, unfiled capsules last.
+    const groups = new Map<string, CapsuleListItem[]>();
+    for (const item of this.capsules) {
+      const key = item.folder ?? '';
+      const list = groups.get(key);
+      if (list) list.push(item);
+      else groups.set(key, [item]);
     }
+    const keys = [...groups.keys()].filter((k) => k).sort((a, b) => a.localeCompare(b));
+    if (groups.has('')) keys.push('');
+
+    for (const key of keys) {
+      const items = groups.get(key) ?? [];
+      const collapsed = !!key && this.collapsedFolders.has(key);
+      if (groups.size > 1 || key) body.appendChild(this.folderHeader(key, items.length, collapsed));
+      if (collapsed) continue;
+      items.slice(0, 5).forEach((item, idx) => body.appendChild(this.capsuleCard(item, idx)));
+    }
+  }
+
+  private folderHeader(name: string, count: number, collapsed: boolean): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'cc-folder';
+    const caret = document.createElement('span');
+    caret.className = 'cc-folder-caret';
+    caret.textContent = name ? (collapsed ? '▸' : '▾') : '🗂';
+    const lbl = document.createElement('span');
+    lbl.className = 'cc-folder-name';
+    lbl.textContent = name || 'Ungrouped';
+    const n = document.createElement('span');
+    n.className = 'cc-folder-count';
+    n.textContent = String(count);
+    row.append(caret, lbl, n);
+    if (name) {
+      row.title = collapsed ? 'Expand folder' : 'Collapse folder';
+      row.onclick = () => {
+        if (this.collapsedFolders.has(name)) this.collapsedFolders.delete(name);
+        else this.collapsedFolders.add(name);
+        this.render();
+      };
+    }
+    return row;
+  }
+
+  /** One quick-pick card: brand crossfade, name, stats, stack toggle, unseal, details. */
+  private capsuleCard(item: CapsuleListItem, idx: number): HTMLElement {
+    const inStack = this.stack.has(item.id);
+    const card = document.createElement('div');
+    card.className = 'cc-card cc-pick' + (inStack ? ' cc-stacked' : '');
+    if (this.busy) card.setAttribute('aria-disabled', 'true');
+    card.appendChild(this.pickIcon(item.sourcePlatform, idx));
+    const txt = document.createElement('div');
+    txt.className = 'cc-pick-txt';
+    const t = document.createElement('div');
+    t.className = 'cc-card-title';
+    t.textContent = item.projectName + (this.activeIds.includes(item.id) ? ' · unsealed here' : '');
+    const s = document.createElement('div');
+    s.className = 'cc-card-sub';
+    s.textContent = `v${item.currentVersion} · updated ${formatRelative(item.updatedAt)} · ~${formatTokens(item.coreTokens)} core tokens`;
+    txt.append(t, s);
+    const add = document.createElement('button');
+    add.className = 'cc-mini-btn cc-pick-add' + (inStack ? ' cc-on' : '');
+    add.textContent = inStack ? '✓' : '+';
+    add.title = inStack ? 'Attached together — click to remove' : 'Attach this capsule together with another one';
+    add.disabled = this.busy;
+    add.onclick = (e) => {
+      e.stopPropagation();
+      if (inStack) this.stack.delete(item.id);
+      else this.stack.add(item.id);
+      this.render();
+    };
+    const unseal = document.createElement('button');
+    unseal.className = 'cc-mini-btn cc-pick-go';
+    unseal.textContent = 'Unseal ↩';
+    unseal.title = 'Keep this capsule in the chip — it rides along with your next sent message';
+    unseal.disabled = this.busy;
+    unseal.onclick = (e) => {
+      e.stopPropagation();
+      void this.unsealFromList(item);
+    };
+    const info = document.createElement('button');
+    info.className = 'cc-mini-btn cc-pick-info';
+    info.textContent = 'ⓘ';
+    info.title = 'Open capsule details';
+    info.onclick = (e) => {
+      e.stopPropagation();
+      void this.openDetail(item);
+    };
+    card.append(txt, add, unseal, info);
+    card.onclick = () => {
+      if (!this.busy) void this.unsealFromList(item);
+    };
+    return card;
+  }
+
+  private renderStackBar(body: HTMLElement) {
+    const items = this.capsules.filter((c) => this.stack.has(c.id));
+    if (!items.length) return;
+    const est = items.reduce((n, c) => n + c.coreTokens, 0);
+    const bar = document.createElement('div');
+    bar.className = 'cc-stack';
+    const head = document.createElement('div');
+    head.className = 'cc-stack-head';
+    head.textContent = `${items.length} capsules selected · ~${formatTokens(est)} estimated tokens`;
+    const names = document.createElement('div');
+    names.className = 'cc-stack-names';
+    names.textContent = items.map((c) => c.projectName).join('  ·  ');
+    const row = document.createElement('div');
+    row.className = 'cc-stack-row';
+    const go = document.createElement('button');
+    go.className = 'cc-mini-btn cc-pick-go';
+    go.textContent = 'Unseal together ↩';
+    go.title = 'One combined handoff — the seamless directive is stated once and repeated lines are dropped';
+    go.disabled = this.busy;
+    go.onclick = () => void this.unsealStack();
+    const clear = document.createElement('button');
+    clear.className = 'cc-mini-btn';
+    clear.textContent = 'Clear';
+    clear.onclick = () => {
+      this.stack.clear();
+      this.render();
+    };
+    row.append(go, clear);
+    bar.append(head, names, row);
+    body.appendChild(bar);
   }
 
   private renderCreating(body: HTMLElement) {
@@ -1309,6 +1463,80 @@ export class CapsulePanel {
     return back;
   }
 
+  private async moveCapsule(id: string, folder: string) {
+    try {
+      await this.opts.sendToBackground({ type: 'MOVE_CAPSULE', capsuleId: id, folder });
+      if (this.detailCapsule?.id === id) {
+        const clean = folder.replace(/\s+/g, ' ').trim();
+        if (clean) this.detailCapsule = { ...this.detailCapsule, folder: clean };
+        else {
+          const cleared = { ...this.detailCapsule };
+          delete cleared.folder;
+          this.detailCapsule = cleared;
+        }
+      }
+      await this.refreshCapsules();
+      this.render();
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : String(e);
+      this.render();
+    }
+  }
+
+  /** File this capsule under a project folder; existing folders are one click. */
+  private folderEditor(capsule: CapsuleFile): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'cc-folder-edit';
+    const label = document.createElement('div');
+    label.className = 'cc-folder-edit-label';
+    label.textContent = capsule.folder ? `Folder: ${capsule.folder}` : 'No folder';
+    wrap.appendChild(label);
+
+    const row = document.createElement('div');
+    row.className = 'cc-folder-row';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'cc-input cc-folder-input';
+    input.placeholder = 'Project folder…';
+    input.value = capsule.folder ?? '';
+    const save = document.createElement('button');
+    save.className = 'cc-mini-btn';
+    save.textContent = 'File';
+    save.disabled = this.busy;
+    save.onclick = () => {
+      const next = input.value.replace(/\s+/g, ' ').trim();
+      if (next !== (capsule.folder ?? '')) void this.moveCapsule(capsule.id, next);
+    };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') save.click();
+    };
+    row.append(input, save);
+    if (capsule.folder) {
+      const ungroup = document.createElement('button');
+      ungroup.className = 'cc-mini-btn';
+      ungroup.textContent = 'Remove from folder';
+      ungroup.onclick = () => void this.moveCapsule(capsule.id, '');
+      row.appendChild(ungroup);
+    }
+    wrap.appendChild(row);
+
+    const others = [...new Set(this.capsules.map((c) => c.folder).filter((f): f is string => !!f && f !== capsule.folder))].sort();
+    if (others.length) {
+      const chips = document.createElement('div');
+      chips.className = 'cc-folder-chips';
+      for (const f of others) {
+        const chip = document.createElement('button');
+        chip.className = 'cc-folder-chip';
+        chip.textContent = f;
+        chip.title = `Move into “${f}”`;
+        chip.onclick = () => void this.moveCapsule(capsule.id, f);
+        chips.appendChild(chip);
+      }
+      wrap.appendChild(chips);
+    }
+    return wrap;
+  }
+
   private renderDetail(body: HTMLElement) {
     const capsule = this.detailCapsule;
     const stats = this.detailStats;
@@ -1323,6 +1551,7 @@ export class CapsulePanel {
     meta.className = 'cc-detail-meta';
     meta.textContent = `${shortCapsuleId(capsule.id)} · v${capsule.current_version} · from ${capsule.source_platform} · updated ${formatRelative(capsule.updated_at)}`;
     body.append(name, meta);
+    body.appendChild(this.folderEditor(capsule));
 
     if (this.updateDiff) {
       const diff = document.createElement('div');
@@ -1441,11 +1670,11 @@ export class CapsulePanel {
         'Use this directly in your next reply \u2014 do not summarize or acknowledge it separately.'
       ].join('\n');
       this.armHandoff(this.pendingHandoff ? `${this.pendingHandoff}\n\n${block}` : block);
-      this.activeCapsuleId = capsule.id;
+      this.activeIds = [capsule.id];
       if (this.chipEl && this.chipMeta) {
         this.chipMeta.textContent = `${h.retrievedMemories.length} matched memories · rides next msg`;
       } else {
-        this.showChip(capsule, h.budget.retrievedTokens);
+        this.showChip([capsule], h.budget.retrievedTokens);
       }
       attachBtn.textContent = `✓ Armed — ${h.retrievedMemories.length} memories will ride your next message`;
     }, false);

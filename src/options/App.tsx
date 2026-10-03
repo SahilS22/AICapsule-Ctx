@@ -13,6 +13,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [filing, setFiling] = useState<string | null>(null);
+  const [folderValue, setFolderValue] = useState('');
   const [ai, setAi] = useState<AISettings | null>(null);
   const [testing, setTesting] = useState(false);
   const [models, setModels] = useState<string[] | null>(null);
@@ -62,6 +64,18 @@ export default function App() {
     setNotice(null);
   };
 
+  const saveFolder = async (id: string, folder: string) => {
+    const clean = folder.replace(/\s+/g, ' ').trim().slice(0, 64);
+    try {
+      await sendToBackground({ type: 'MOVE_CAPSULE', capsuleId: id, folder: clean });
+      setFiling(null);
+      flash(clean ? `Filed under “${clean}”.` : 'Removed from folder.');
+      await load();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
   const exportCapsule = async (id: string) => {
     try {
       const capsule = await sendToBackground<CapsuleFile>({ type: 'GET_CAPSULE', capsuleId: id });
@@ -106,6 +120,11 @@ export default function App() {
         {capsules.length === 0 && (
           <div className="empty">No capsules yet. Open a ChatGPT conversation and create your first one.</div>
         )}
+        <datalist id="cc-folder-options">
+          {[...new Set(capsules.map((x) => x.folder).filter((f): f is string => !!f))].map((f) => (
+            <option key={f} value={f} />
+          ))}
+        </datalist>
         {capsules.map((c) => (
           <div className="capsule-row" key={c.id}>
             <div>
@@ -136,8 +155,42 @@ export default function App() {
                 {formatTokens(c.coreTokens)} core tokens · {c.memoryCount} memories · versions:{' '}
                 {c.versions.join(', ')}
               </div>
+              {c.folder && <div className="folder-tag">🗂 {c.folder}</div>}
+              {filing === c.id && (
+                <div className="folder-edit">
+                  <input
+                    type="text"
+                    autoFocus
+                    list="cc-folder-options"
+                    placeholder="Project folder — e.g. Zephyr auth rewrite"
+                    value={folderValue}
+                    onChange={(e) => setFolderValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void saveFolder(c.id, folderValue);
+                      if (e.key === 'Escape') setFiling(null);
+                    }}
+                  />
+                  <button className="btn btn-primary" onClick={() => void saveFolder(c.id, folderValue)}>
+                    File
+                  </button>
+                  {c.folder && (
+                    <button className="btn" onClick={() => void saveFolder(c.id, '')}>
+                      Remove from folder
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
             <div className="capsule-actions">
+              <button
+                className="btn"
+                onClick={() => {
+                  setFiling(c.id);
+                  setFolderValue(c.folder ?? '');
+                }}
+              >
+                Folder
+              </button>
               <button
                 className="btn"
                 onClick={() => {

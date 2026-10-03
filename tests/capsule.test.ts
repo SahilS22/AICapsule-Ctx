@@ -56,6 +56,32 @@ describe('capsule file roundtrip', () => {
     if (!tooNew.ok) expect(tooNew.error).toMatch(/newer than/);
   });
 
+  it('keeps the project folder through a roundtrip', () => {
+    const capsule = createCapsule(extraction(['We decided to use ChromaDB for vector search.']));
+    expect('folder' in capsule).toBe(false); // unfiled capsules stay unfiled
+
+    capsule.folder = 'Zephyr auth rewrite';
+    const parsed = parseCapsuleText(serializeCapsule(capsule));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.file.folder).toBe('Zephyr auth rewrite');
+  });
+
+  it('collapses whitespace in folder names and caps their length', () => {
+    const result = validateCapsuleFile({
+      capsule_version: 1,
+      id: 'cap_folder',
+      folder: '  payment   service\n  ' + 'x'.repeat(200)
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.file.folder).toHaveLength(64);
+      expect(result.file.folder).toMatch(/^payment service x+$/);
+    }
+    const blank = validateCapsuleFile({ capsule_version: 1, id: 'cap_blank', folder: '   ' });
+    expect(blank.ok).toBe(true);
+    if (blank.ok) expect('folder' in blank.file).toBe(false);
+  });
+
   it('sanitizes malformed memories instead of crashing', () => {
     const result = validateCapsuleFile({
       capsule_version: 1,

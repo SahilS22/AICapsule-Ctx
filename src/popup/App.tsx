@@ -173,6 +173,7 @@ export default function App() {
               {state.capsules.slice(0, 4).map((c) => (
                 <button key={c.id} className="capsule-card" onClick={() => chrome.runtime.openOptionsPage()}>
                   <div className="name">{c.projectName}</div>
+                  {c.folder && <div className="folder">🗂 {c.folder}</div>}
                   <div className="meta">
                     v{c.currentVersion} · updated {formatRelative(c.updatedAt)} · ~{formatTokens(c.coreTokens)} core
                     tokens

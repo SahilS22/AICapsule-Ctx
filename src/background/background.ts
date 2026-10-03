@@ -18,6 +18,7 @@ function toListItem(c: Awaited<ReturnType<typeof getCapsule>> & object): Capsule
   return {
     id: c.id,
     projectName: c.project.name,
+    folder: c.folder,
     updatedAt: c.updated_at,
     sourcePlatform: c.source_platform,
     currentVersion: c.current_version,
@@ -99,6 +100,17 @@ async function handle(message: ExtMessage): Promise<unknown> {
       if (!capsule) throw new Error('Capsule not found');
       capsule.project.name = message.name.trim() || capsule.project.name;
       capsule.updated_at = nowIso();
+      await saveCapsule(capsule);
+      return toListItem(capsule);
+    }
+
+    case 'MOVE_CAPSULE': {
+      const capsule = await getCapsule(message.capsuleId);
+      if (!capsule) throw new Error('Capsule not found');
+      const folder = (message.folder ?? '').replace(/\s+/g, ' ').trim().slice(0, 64);
+      if (folder) capsule.folder = folder;
+      else delete capsule.folder;
+      // Filing is not a content change — don't bump updated_at and jump the recents list.
       await saveCapsule(capsule);
       return toListItem(capsule);
     }
@@ -194,7 +206,7 @@ async function handle(message: ExtMessage): Promise<unknown> {
 }
 
 const MUTATING: ExtMessage['type'][] = [
-  'CREATE_CAPSULE', 'UPDATE_CAPSULE', 'IMPORT_CAPSULE', 'DELETE_CAPSULE', 'RENAME_CAPSULE',
+  'CREATE_CAPSULE', 'UPDATE_CAPSULE', 'IMPORT_CAPSULE', 'DELETE_CAPSULE', 'RENAME_CAPSULE', 'MOVE_CAPSULE',
   'RESTORE_VERSION', 'REMOVE_MEMORY', 'TOGGLE_PIN_MEMORY', 'CLEAR_ALL'
 ];
 

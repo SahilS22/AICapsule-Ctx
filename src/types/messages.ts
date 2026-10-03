@@ -10,6 +10,7 @@ export type ExtMessage =
   | { type: 'IMPORT_CAPSULE'; file: CapsuleFile }
   | { type: 'DELETE_CAPSULE'; capsuleId: string }
   | { type: 'RENAME_CAPSULE'; capsuleId: string; name: string }
+  | { type: 'MOVE_CAPSULE'; capsuleId: string; folder: string | null }
   | { type: 'RESTORE_VERSION'; capsuleId: string; version: number }
   | { type: 'REMOVE_MEMORY'; capsuleId: string; memoryId: string }
   | { type: 'TOGGLE_PIN_MEMORY'; capsuleId: string; memoryId: string }
@@ -30,6 +31,7 @@ export interface PageInfo {
 export interface CapsuleListItem {
   id: string;
   projectName: string;
+  folder?: string;
   updatedAt: string;
   sourcePlatform: PlatformId;
   currentVersion: number;
